@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Office attendance</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background:#f5f5f4; margin:0; padding:24px 16px; display:flex; justify-content:center; }
+  .card { background:#fff; border-radius:12px; padding:24px; max-width:360px; width:100%;
+          box-shadow:0 1px 3px rgba(0,0,0,0.08); }
+  h1 { font-size:18px; margin:0 0 4px; text-align:center; }
+  .clock { text-align:center; font-size:13px; color:#666; margin-bottom:20px; }
+  label { font-size:13px; color:#555; display:block; margin-bottom:4px; }
+  input { width:100%; box-sizing:border-box; padding:10px 12px; margin-bottom:14px;
+          border:1px solid #ddd; border-radius:8px; font-size:16px; }
+  .row { display:flex; gap:8px; }
+  button { flex:1; padding:12px; border-radius:8px; border:1px solid #ccc; background:#fff;
+           font-size:15px; cursor:pointer; }
+  button:active { transform:scale(0.98); }
+  button.primary { background:#111; color:#fff; border-color:#111; }
+  #status { font-size:13px; min-height:20px; margin-bottom:12px; text-align:center; }
+  .ok { color:#0a7a4a; }
+  .err { color:#b3261e; }
+  .warn { color:#8a5a00; }
+  #today { font-size:13px; color:#666; text-align:center; margin-top:16px;
+           padding-top:12px; border-top:1px solid #eee; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Office attendance</h1>
+  <div class="clock" id="clock"></div>
+
+  <label for="code">Employee code</label>
+  <input type="text" id="code" placeholder="e.g. EMP-001" autocomplete="off" />
+
+  <label for="pin">PIN</label>
+  <input type="password" id="pin" inputmode="numeric" placeholder="4-digit PIN" autocomplete="off" />
+
+  <div id="status"></div>
+
+  <div class="row">
+    <button class="primary" id="btn-in" onclick="handleAttendance('in')">Check in</button>
+    <button id="btn-out" onclick="handleAttendance('out')">Check out</button>
+  </div>
+
+  <div id="today"></div>
+</div>
+
+<script>
+// ---- Configuration: replace with your Supabase project values ----
+const SUPABASE_URL = 'https://ytkhwlsqdgfmoggkozqz.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl0a2h3bHNxZGdmbW9nZ2tvenF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwMzcwMDQsImV4cCI6MjA5ODYxMzAwNH0.HsFqRM2vLSiVr9rhpmu2nMQTFgqNXbQ1wCbeQ70JdSU';
+// --------------------------------------------------------------------
+
+// ---- Geofencing (optional, disabled by default) ----
+// Set ENABLE_GEOFENCE to true and fill in your office coordinates + radius
+// to reject check-ins made away from the office. Get lat/lng from Google
+// Maps: right-click your office location -> the numbers shown are lat,lng.
+const ENABLE_GEOFENCE = false;
+const OFFICE_LAT = 0;
+const OFFICE_LNG = 0;
+const OFFICE_RADIUS_METERS = 150;
+// -----------------------------------------------------
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+function updateClock(){
+  document.getElementById('clock').textContent = new Date().toLocaleString();
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+function setStatus(msg, cls){
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = cls || '';
+}
+
+function distanceMeters(lat1, lng1, lat2, lng2){
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2-lat1);
+  const dLng = toRad(lng2-lng1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function getLocation(){
+  return new Promise((resolve) => {
+    if(!ENABLE_GEOFENCE || !navigator.geolocation){
+      resolve({lat: null, lng: null, skip: true});
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve({lat: pos.coords.latitude, lng: pos.coords.longitude, skip: false}),
+      () => resolve({lat: null, lng: null, skip: true, error: true}),
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  });
+}
+
+async function handleAttendance(action){
+  const code = document.getElementById('code').value.trim();
+  const pin = document.getElementById('pin').value.trim();
+
+  if(!code || !pin){
+    setStatus('Enter your employee code and PIN.', 'err');
+    return;
+  }
+
+  setStatus('Checking...', '');
+
+  // Step 1: verify PIN via the security-definer function (never exposes pin_hash)
+  const { data: employees, error: verifyErr } = await sb
+    .rpc('verify_pin', { p_employee_code: code, p_pin: pin });
+
+  if(verifyErr){
+    setStatus('Something went wrong. Try again.', 'err');
+    console.error(verifyErr);
+    return;
+  }
+  if(!employees || employees.length === 0){
+    setStatus('Employee code or PIN not recognized.', 'err');
+    return;
+  }
+  const employee = employees[0];
+
+  // Step 2: optional geofence check
+  const loc = await getLocation();
+  if(ENABLE_GEOFENCE && !loc.skip){
+    const dist = distanceMeters(loc.lat, loc.lng, OFFICE_LAT, OFFICE_LNG);
+    if(dist > OFFICE_RADIUS_METERS){
+      setStatus('You appear to be outside the office. Check-in must be done on-site.', 'err');
+      return;
+    }
+  } else if(ENABLE_GEOFENCE && loc.error){
+    setStatus('Location permission is required to check in here.', 'err');
+    return;
+  }
+
+  // Step 3: record the check-in/out server-side
+  const { data: result, error: recordErr } = await sb
+    .rpc('record_attendance', {
+      p_employee_id: employee.id,
+      p_action: action,
+      p_lat: loc.lat,
+      p_lng: loc.lng
+    });
+
+  if(recordErr){
+    setStatus('Something went wrong saving your record.', 'err');
+    console.error(recordErr);
+    return;
+  }
+
+  const row = result && result[0];
+  if(row && row.result === 'ok'){
+    setStatus(row.message + ' — ' + employee.name, 'ok');
+    document.getElementById('pin').value = '';
+  } else if(row){
+    setStatus(row.message, 'warn');
+  }
+}
+</script>
+</body>
+</html>

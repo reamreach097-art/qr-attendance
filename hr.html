@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HR dashboard — attendance</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background:#f5f5f4; margin:0; padding:24px; }
+  .wrap { max-width:900px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 20px; }
+  .card { background:#fff; border-radius:12px; padding:24px; box-shadow:0 1px 3px rgba(0,0,0,0.08); }
+  #login-card { max-width:360px; margin:60px auto; }
+  label { font-size:13px; color:#555; display:block; margin-bottom:4px; }
+  input, select { width:100%; box-sizing:border-box; padding:9px 10px; margin-bottom:12px;
+          border:1px solid #ddd; border-radius:8px; font-size:14px; }
+  button { padding:9px 16px; border-radius:8px; border:1px solid #ccc; background:#fff;
+           font-size:14px; cursor:pointer; }
+  button.primary { background:#111; color:#fff; border-color:#111; width:100%; }
+  #err { color:#b3261e; font-size:13px; min-height:18px; }
+  .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:20px; }
+  .stat { background:#f7f7f5; border-radius:8px; padding:14px; }
+  .stat .label { font-size:12px; color:#777; }
+  .stat .value { font-size:22px; font-weight:600; margin-top:4px; }
+  .filters { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px; }
+  .filters > div { min-width:140px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; padding:8px; color:#666; font-weight:600; border-bottom:2px solid #eee; }
+  td { padding:8px; border-bottom:1px solid #f0f0f0; }
+  #topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; }
+  .empty { text-align:center; color:#999; padding:40px; font-size:13px; }
+</style>
+</head>
+<body>
+
+<div id="login-card" class="card">
+  <h1>HR login</h1>
+  <label for="email">Email</label>
+  <input type="email" id="email" autocomplete="username" />
+  <label for="password">Password</label>
+  <input type="password" id="password" autocomplete="current-password" />
+  <div id="err"></div>
+  <button class="primary" onclick="login()">Log in</button>
+</div>
+
+<div class="wrap" id="dashboard" style="display:none;">
+  <div id="topbar">
+    <h1>Attendance dashboard</h1>
+    <button onclick="logout()">Log out</button>
+  </div>
+
+  <div class="card">
+    <div class="stats">
+      <div class="stat"><div class="label">Records</div><div class="value" id="stat-total">0</div></div>
+      <div class="stat"><div class="label">Employees</div><div class="value" id="stat-employees">0</div></div>
+      <div class="stat"><div class="label">Today's check-ins</div><div class="value" id="stat-today">0</div></div>
+      <div class="stat"><div class="label">Avg hours/day</div><div class="value" id="stat-avg">0</div></div>
+    </div>
+
+    <div class="filters">
+      <div>
+        <label>Employee</label>
+        <select id="filter-employee" onchange="render()"><option value="">All</option></select>
+      </div>
+      <div>
+        <label>From</label>
+        <input type="date" id="filter-from" onchange="render()" />
+      </div>
+      <div>
+        <label>To</label>
+        <input type="date" id="filter-to" onchange="render()" />
+      </div>
+      <button onclick="clearFilters()">Clear filters</button>
+      <button onclick="exportCSV()" style="margin-left:auto;">Export CSV</button>
+    </div>
+
+    <table>
+      <thead>
+        <tr><th>Date</th><th>Employee</th><th>Code</th><th>Check in</th><th>Check out</th><th>Hours</th></tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="empty" id="empty" style="display:none;">No records match these filters.</div>
+  </div>
+</div>
+
+<script>
+const SUPABASE_URL = 'https://ytkhwlsqdgfmoggkozqz.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl0a2h3bHNxZGdmbW9nZ2tvenF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwMzcwMDQsImV4cCI6MjA5ODYxMzAwNH0.HsFqRM2vLSiVr9rhpmu2nMQTFgqNXbQ1wCbeQ70JdSU';
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+let allRecords = [];
+let employeeMap = {};
+
+async function login(){
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  document.getElementById('err').textContent = '';
+
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if(error){
+    document.getElementById('err').textContent = 'Login failed. Check your email and password.';
+    return;
+  }
+
+  // Confirm this user is a registered HR admin (RLS also enforces this on data access)
+  const { data: adminRow } = await sb
+    .from('hr_admins')
+    .select('user_id')
+    .eq('user_id', data.user.id)
+    .maybeSingle();
+
+  if(!adminRow){
+    document.getElementById('err').textContent = 'This account is not authorized for HR access.';
+    await sb.auth.signOut();
+    return;
+  }
+
+  document.getElementById('login-card').style.display = 'none';
+  document.getElementById('dashboard').style.display = 'block';
+  await loadData();
+}
+
+async function logout(){
+  await sb.auth.signOut();
+  document.getElementById('dashboard').style.display = 'none';
+  document.getElementById('login-card').style.display = 'block';
+}
+
+async function loadData(){
+  const { data: employees } = await sb.from('employees').select('id, name, employee_code');
+  (employees || []).forEach(e => employeeMap[e.id] = e);
+
+  const { data: records, error } = await sb
+    .from('attendance_records')
+    .select('*')
+    .order('date', { ascending: false });
+
+  if(error){ console.error(error); return; }
+  allRecords = records || [];
+
+  populateEmployeeFilter();
+  render();
+}
+
+function populateEmployeeFilter(){
+  const sel = document.getElementById('filter-employee');
+  const names = [...new Set(Object.values(employeeMap).map(e => e.name))].sort();
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All</option>' +
+    names.map(n => `<option value="${n}">${n}</option>`).join('');
+  sel.value = current;
+}
+
+function hoursBetween(inT, outT){
+  if(!inT || !outT) return null;
+  return (new Date(outT) - new Date(inT)) / 1000 / 3600;
+}
+
+function clearFilters(){
+  document.getElementById('filter-employee').value = '';
+  document.getElementById('filter-from').value = '';
+  document.getElementById('filter-to').value = '';
+  render();
+}
+
+function getFiltered(){
+  const empName = document.getElementById('filter-employee').value;
+  const from = document.getElementById('filter-from').value;
+  const to = document.getElementById('filter-to').value;
+
+  return allRecords.filter(r => {
+    const emp = employeeMap[r.employee_id];
+    if(empName && (!emp || emp.name !== empName)) return false;
+    if(from && r.date < from) return false;
+    if(to && r.date > to) return false;
+    return true;
+  });
+}
+
+function render(){
+  const filtered = getFiltered();
+  const tbody = document.getElementById('tbody');
+  const emptyEl = document.getElementById('empty');
+
+  document.getElementById('stat-total').textContent = allRecords.length;
+  document.getElementById('stat-employees').textContent = Object.keys(employeeMap).length;
+  const todayStr = new Date().toISOString().slice(0,10);
+  document.getElementById('stat-today').textContent =
+    allRecords.filter(r => r.date === todayStr && r.check_in_time).length;
+
+  const hoursList = allRecords.map(r => hoursBetween(r.check_in_time, r.check_out_time)).filter(h => h !== null);
+  const avg = hoursList.length ? hoursList.reduce((a,b)=>a+b,0)/hoursList.length : 0;
+  document.getElementById('stat-avg').textContent = avg.toFixed(1);
+
+  if(filtered.length === 0){
+    tbody.innerHTML = '';
+    emptyEl.style.display = 'block';
+    return;
+  }
+  emptyEl.style.display = 'none';
+
+  tbody.innerHTML = filtered.map(r => {
+    const emp = employeeMap[r.employee_id] || { name: 'Unknown', employee_code: '—' };
+    const h = hoursBetween(r.check_in_time, r.check_out_time);
+    const inT = r.check_in_time ? new Date(r.check_in_time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '—';
+    const outT = r.check_out_time ? new Date(r.check_out_time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '—';
+    return `<tr>
+      <td>${r.date}</td>
+      <td>${emp.name}</td>
+      <td>${emp.employee_code}</td>
+      <td>${inT}</td>
+      <td>${outT}</td>
+      <td>${h !== null ? h.toFixed(1) : '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function exportCSV(){
+  const filtered = getFiltered();
+  const rows = [['Date','Employee','Code','Check in','Check out','Hours']];
+  filtered.forEach(r => {
+    const emp = employeeMap[r.employee_id] || { name: 'Unknown', employee_code: '' };
+    const h = hoursBetween(r.check_in_time, r.check_out_time);
+    rows.push([
+      r.date, emp.name, emp.employee_code,
+      r.check_in_time ? new Date(r.check_in_time).toLocaleTimeString() : '',
+      r.check_out_time ? new Date(r.check_out_time).toLocaleTimeString() : '',
+      h !== null ? h.toFixed(2) : ''
+    ]);
+  });
+  const csv = rows.map(row => row.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'attendance_export.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Restore session on reload
+(async function init(){
+  const { data } = await sb.auth.getSession();
+  if(data.session){
+    const { data: adminRow } = await sb
+      .from('hr_admins')
+      .select('user_id')
+      .eq('user_id', data.session.user.id)
+      .maybeSingle();
+    if(adminRow){
+      document.getElementById('login-card').style.display = 'none';
+      document.getElementById('dashboard').style.display = 'block';
+      await loadData();
+    }
+  }
+})();
+</script>
+</body>
+</html>
